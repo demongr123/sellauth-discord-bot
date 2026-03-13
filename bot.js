@@ -1,117 +1,267 @@
-const { Client, GatewayIntentBits, EmbedBuilder } = require("discord.js");
+const { Client, GatewayIntentBits, SlashCommandBuilder, REST, Routes, EmbedBuilder } = require("discord.js");
 const axios = require("axios");
 const express = require("express");
+const fs = require("fs");
 
-const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
-const CHANNEL_ID = process.env.CHANNEL_ID;
+const TOKEN = process.env.DISCORD_TOKEN;
+const CLIENT_ID = process.env.CLIENT_ID;
+const GUILD_ID = process.env.GUILD_ID;
 const SHOP_ID = process.env.SHOP_ID;
-const SELLAUTH_API_KEY = process.env.SELLAUTH_API_KEY;
-const CHECK_INTERVAL_MS = Number(process.env.CHECK_INTERVAL_MS || 60000);
+const API_KEY = process.env.SELLAUTH_API_KEY;
 
-// Render web service must bind to PORT. Render sets PORT automatically.
-// Default is usually 10000 for web services.
-const PORT = process.env.PORT || 10000;
+const CHECK_INTERVAL = 60000;
 
-if (!DISCORD_TOKEN || !CHANNEL_ID || !SHOP_ID || !SELLAUTH_API_KEY) {
-  console.error("Missing required environment variables.");
-  process.exit(1);
+const CONFIG_FILE = "./config.json";
+
+function loadConfig() {
+ if (!fs.existsSync(CONFIG_FILE)) {
+  fs.writeFileSync(CONFIG_FILE, JSON.stringify({}));
+ }
+ return JSON.parse(fs.readFileSync(CONFIG_FILE));
 }
 
-const app = express();
-app.get("/", (_req, res) => {
-  res.status(200).send("Bot is alive");
-});
+function saveConfig(data) {
+ fs.writeFileSync(CONFIG_FILE, JSON.stringify(data, null, 2));
+}
 
-app.get("/health", (_req, res) => {
-  res.status(200).json({ ok: true, uptime: process.uptime() });
-});
-
-app.listen(PORT, () => {
-  console.log(`HTTP server listening on port ${PORT}`);
-});
+let config = loadConfig();
+let lastStock = {};
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds]
+ intents: [GatewayIntentBits.Guilds]
 });
 
-// Αποθηκεύουμε προηγούμενο stock για να στέλνει μόνο όταν αλλάζει
-const lastStock = new Map();
-let botReady = false;
+const commands = [
+ new SlashCommandBuilder()
+  .setName("setup")
+  .setDescription("Setup product tracking")
+  .addStringOption(o =>
+   o.setName("product_id").setDescription("SellAuth product id").setRequired(true))
+  .addChannelOption(o =>
+   o.setName("restock_channel").setDescription("Channel for restock").setRequired(true))
+  .addChannelOption(o =>
+   o.setName("outofstock_channel").setDescription("Channel for out of stock").setRequired(true)),
+
+ new SlashCommandBuilder()
+  .setName("remove")
+  .setDescription("Remove product tracking")
+  .addStringOption(o =>
+   o.setName("product_id").setDescription("Product id").setRequired(true)),
+
+ new SlashCommandBuilder()
+  .setName("list")
+  .setDescription("Show tracked products"),
+
+ new SlashCommandBuilder()
+  .setName("testalert")
+  .setDescription("Send test alert")
+  .addStringOption(o =>
+   o.setName("product_id").setDescription("Product id").setRequired(true))
+  .addStringOption(o =>
+   o.setName("type")
+   .setDescription("alert type")
+   .setRequired(true)
+   .addChoices(
+    { name: "restock", value: "restock" },
+    { name: "outofstock", value: "outofstock" }
+   ))
+].map(c => c.toJSON());
+
+async function registerCommands() {
+ const rest = new REST({ version: "10" }).setToken(TOKEN);
+
+ await rest.put(
+  Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
+  { body: commands }
+ );
+}
 
 async function fetchProducts() {
-  // Αν το δικό σου endpoint είναι διαφορετικό, θα το αλλάξουμε μετά.
-  const url = `https://api.sellauth.com/v1/shops/${SHOP_ID}/products`;
+ const res = await axios.get(
+  `https://api.sellauth.com/v1/shops/${SHOP_ID}/products`,
+  {
+   headers: {
+    Authorization: `Bearer ${API_KEY}`
+   }
+  }
+ );
 
-  const response = await axios.get(url, {
-    headers: {
-      Authorization: `Bearer ${SELLAUTH_API_KEY}`,
-      Accept: "application/json"
-    },
-    timeout: 15000
-  });
-
-  return response.data?.data || [];
+ return res.data.data || [];
 }
 
 async function checkStock() {
-  if (!botReady) return;
 
-  try {
-    const channel = await client.channels.fetch(CHANNEL_ID);
-    if (!channel || !channel.isTextBased()) {
-      console.error("Invalid Discord channel.");
-      return;
-    }
+ try {
 
-    const products = await fetchProducts();
+  config = loadConfig();
 
-    for (const product of products) {
-      const name = product.name || "Unknown Product";
-      const id = String(product.id ?? name);
-      const stock = Number(product.stock ?? 0);
-      const prev = lastStock.has(id) ? lastStock.get(id) : null;
+  const products = await fetchProducts();
 
-      // πρώτο πέρασμα: αποθήκευση χωρίς spam
-      if (prev === null) {
-        lastStock.set(id, stock);
-        continue;
-      }
+  for (const product of products) {
 
-      // restock
-      if (prev <= 0 && stock > 0) {
-        const embed = new EmbedBuilder()
-          .setTitle("Restock")
-          .setDescription(`Το **${name}** είναι ξανά διαθέσιμο.`)
-          .addFields(
-            { name: "Stock", value: String(stock), inline: true },
-            { name: "Product ID", value: id, inline: true }
-          )
-          .setTimestamp();
+   const id = String(product.id);
+   const stock = Number(product.stock || 0);
+   const name = product.name;
 
-        await channel.send({ embeds: [embed] });
-      }
+   if (!config[id]) continue;
 
-      // out of stock
-      if (prev > 0 && stock <= 0) {
-        await channel.send(`❌ **${name}** είναι τώρα out of stock.`);
-      }
+   const prev = lastStock[id];
 
-      lastStock.set(id, stock);
-    }
-  } catch (error) {
-    console.error("checkStock error:", error.response?.data || error.message);
+   if (prev === undefined) {
+    lastStock[id] = stock;
+    continue;
+   }
+
+   if (prev <= 0 && stock > 0) {
+
+    const channel = await client.channels.fetch(config[id].restock);
+
+    const embed = new EmbedBuilder()
+     .setTitle("🔥 Restock")
+     .setDescription(`${name} is back in stock`)
+     .addFields({ name: "Stock", value: String(stock) })
+     .setTimestamp();
+
+    channel.send({ embeds: [embed] });
+
+   }
+
+   if (prev > 0 && stock <= 0) {
+
+    const channel = await client.channels.fetch(config[id].oos);
+
+    const embed = new EmbedBuilder()
+     .setTitle("❌ Out Of Stock")
+     .setDescription(`${name} is now out of stock`)
+     .setTimestamp();
+
+    channel.send({ embeds: [embed] });
+
+   }
+
+   lastStock[id] = stock;
+
   }
+
+ } catch (err) {
+
+  console.log(err.message);
+
+ }
+
 }
 
-client.once("ready", async () => {
-  botReady = true;
-  console.log(`Logged in as ${client.user.tag}`);
+client.on("interactionCreate", async interaction => {
 
-  // αρχικό check
-  await checkStock();
+ if (!interaction.isChatInputCommand()) return;
 
-  // επαναληπτικός έλεγχος
-  setInterval(checkStock, CHECK_INTERVAL_MS);
+ if (interaction.commandName === "setup") {
+
+  const product = interaction.options.getString("product_id");
+  const restock = interaction.options.getChannel("restock_channel");
+  const oos = interaction.options.getChannel("outofstock_channel");
+
+  config[product] = {
+   restock: restock.id,
+   oos: oos.id
+  };
+
+  saveConfig(config);
+
+  interaction.reply({
+   content: `Setup saved for product ${product}`,
+   ephemeral: true
+  });
+
+ }
+
+ if (interaction.commandName === "remove") {
+
+  const product = interaction.options.getString("product_id");
+
+  delete config[product];
+
+  saveConfig(config);
+
+  interaction.reply({
+   content: `Product removed`,
+   ephemeral: true
+  });
+
+ }
+
+ if (interaction.commandName === "list") {
+
+  let text = "";
+
+  for (let id in config) {
+
+   text += `Product **${id}**\nRestock: <#${config[id].restock}>\nOutOfStock: <#${config[id].oos}>\n\n`;
+
+  }
+
+  if (text === "") text = "No tracked products";
+
+  interaction.reply({
+   content: text,
+   ephemeral: true
+  });
+
+ }
+
+ if (interaction.commandName === "testalert") {
+
+  const product = interaction.options.getString("product_id");
+  const type = interaction.options.getString("type");
+
+  if (!config[product]) {
+   return interaction.reply({
+    content: "Product not setup",
+    ephemeral: true
+   });
+  }
+
+  if (type === "restock") {
+
+   const channel = await client.channels.fetch(config[product].restock);
+
+   channel.send("🔥 Test Restock Alert");
+
+  }
+
+  if (type === "outofstock") {
+
+   const channel = await client.channels.fetch(config[product].oos);
+
+   channel.send("❌ Test Out Of Stock Alert");
+
+  }
+
+  interaction.reply({
+   content: "Test sent",
+   ephemeral: true
+  });
+
+ }
+
 });
 
-client.login(DISCORD_TOKEN);
+client.once("ready", async () => {
+
+ console.log("Bot ready");
+
+ await registerCommands();
+
+ setInterval(checkStock, CHECK_INTERVAL);
+
+});
+
+client.login(TOKEN);
+
+const app = express();
+
+app.get("/", (req, res) => {
+ res.send("Bot running");
+});
+
+app.listen(process.env.PORT || 3000);
