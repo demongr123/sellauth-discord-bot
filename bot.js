@@ -43,7 +43,6 @@ function loadConfig() {
   try {
     return JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8"));
   } catch (error) {
-    console.error("Failed to parse config.json, resetting file.");
     fs.writeFileSync(CONFIG_FILE, JSON.stringify({}, null, 2));
     return {};
   }
@@ -67,10 +66,7 @@ app.get("/", (_req, res) => {
 });
 
 app.get("/health", (_req, res) => {
-  res.json({
-    ok: true,
-    uptime: process.uptime()
-  });
+  res.json({ ok: true, uptime: process.uptime() });
 });
 
 app.listen(PORT, () => {
@@ -80,11 +76,11 @@ app.listen(PORT, () => {
 const commands = [
   new SlashCommandBuilder()
     .setName("setchannel")
-    .setDescription("Set the channel for Niro Market stock alerts")
+    .setDescription("Set the stock alerts channel")
     .addChannelOption(option =>
       option
         .setName("channel")
-        .setDescription("Channel where alerts will be sent")
+        .setDescription("Channel for stock alerts")
         .addChannelTypes(ChannelType.GuildText)
         .setRequired(true)
     ),
@@ -98,18 +94,12 @@ const commands = [
     .setDescription("Show the current stock alerts channel"),
 
   new SlashCommandBuilder()
-    .setName("teststock")
-    .setDescription("Send a test daily stock message"),
+    .setName("testrestock")
+    .setDescription("Send a test restock alert"),
 
   new SlashCommandBuilder()
-    .setName("testrestock")
-    .setDescription("Send a test restock message")
-    .addStringOption(option =>
-      option
-        .setName("product_name")
-        .setDescription("Fake product name for the test")
-        .setRequired(false)
-    )
+    .setName("teststock")
+    .setDescription("Send a test daily stock update")
 ].map(command => command.toJSON());
 
 async function registerCommands() {
@@ -138,13 +128,21 @@ async function fetchProducts() {
   return response.data?.data || [];
 }
 
+function getProductName(product) {
+  return product.name || `Product ${product.id}`;
+}
+
 function getProductImage(product) {
+  if (Array.isArray(product.images) && product.images.length > 0) {
+    if (product.images[0]?.url) return product.images[0].url;
+  }
+
   return (
-    product.images?.[0]?.url ||
     product.image?.url ||
-    product.url ||
     product.image ||
     product.image_url ||
+    product.thumbnail ||
+    product.url ||
     null
   );
 }
@@ -155,18 +153,34 @@ function getProductPrice(product) {
     product.display_price ??
     product.price_with_currency ??
     product.currency_price ??
+    product.price_formatted ??
     product.price ??
+    product.variant?.price ??
+    product.variants?.[0]?.price ??
     null;
 
   if (raw === null || raw === undefined || raw === "") {
     return "Unknown";
   }
 
+  if (typeof raw === "number") {
+    return `€${raw}`;
+  }
+
   return String(raw);
 }
 
-function getProductName(product) {
-  return product.name || `Product ${product.id}`;
+function getProductStock(product) {
+  const raw =
+    product.stock ??
+    product.quantity ??
+    product.virtual_stock ??
+    product.variants?.[0]?.stock ??
+    product.variants?.[0]?.quantity ??
+    0;
+
+  const parsed = Number(raw);
+  return Number.isNaN(parsed) ? 0 : parsed;
 }
 
 function buildStoreButton(label = "Buy Now") {
@@ -178,17 +192,16 @@ function buildStoreButton(label = "Buy Now") {
   return new ActionRowBuilder().addComponents(button);
 }
 
-function buildRestockEmbed(product, stock) {
+function buildRestockEmbed(product) {
   const name = getProductName(product);
   const price = getProductPrice(product);
+  const stock = getProductStock(product);
   const image = getProductImage(product);
 
   const embed = new EmbedBuilder()
     .setColor(EMBED_COLOR)
     .setTitle(`${name} Restocked`)
-    .setDescription(
-      `**${name}** has just been restocked and is now available in **${STORE_NAME}**.`
-    )
+    .setDescription(`**${name}** has just been restocked in **${STORE_NAME}**.`)
     .addFields(
       { name: "Price", value: `**${price}**`, inline: true },
       { name: "Stock", value: `**${stock}**`, inline: true },
@@ -205,30 +218,27 @@ function buildRestockEmbed(product, stock) {
 }
 
 function buildDailyStockEmbeds(products) {
-  const sortedProducts = [...products].sort((a, b) => {
-    const stockA = Number(a.stock || 0);
-    const stockB = Number(b.stock || 0);
-    return stockB - stockA;
-  });
+  const productLines = products
+    .sort((a, b) => getProductStock(b) - getProductStock(a))
+    .map(product => {
+      const name = getProductName(product);
+      const price = getProductPrice(product);
+      const stock = getProductStock(product);
 
-  const lines = sortedProducts.map(product => {
-    const name = getProductName(product);
-    const stock = Number(product.stock || 0);
-    const price = getProductPrice(product);
-
-    return `**${name}**\nPrice: **${price}** • Stock: **${stock}**`;
-  });
+      return `**${name}**\nPrice: **${price}** • Stock: **${stock}**`;
+    });
 
   const chunks = [];
   let currentChunk = "";
 
-  for (const line of lines) {
-    const next = currentChunk ? `${currentChunk}\n\n${line}` : line;
-    if (next.length > 3800) {
+  for (const line of productLines) {
+    const nextChunk = currentChunk ? `${currentChunk}\n\n${line}` : line;
+
+    if (nextChunk.length > 3800) {
       chunks.push(currentChunk);
       currentChunk = line;
     } else {
-      currentChunk = next;
+      currentChunk = nextChunk;
     }
   }
 
@@ -236,14 +246,18 @@ function buildDailyStockEmbeds(products) {
     chunks.push(currentChunk);
   }
 
-  return chunks.map((chunk, index) => {
-    return new EmbedBuilder()
+  return chunks.map((chunk, index) =>
+    new EmbedBuilder()
       .setColor(EMBED_COLOR)
-      .setTitle(index === 0 ? `${STORE_NAME} Stock Update` : `${STORE_NAME} Stock Update (${index + 1})`)
+      .setTitle(
+        index === 0
+          ? `${STORE_NAME} Stock Update`
+          : `${STORE_NAME} Stock Update (${index + 1})`
+      )
       .setDescription(chunk)
       .setFooter({ text: STORE_NAME })
-      .setTimestamp();
-  });
+      .setTimestamp()
+  );
 }
 
 async function getConfiguredChannel() {
@@ -255,9 +269,7 @@ async function getConfiguredChannel() {
 
   try {
     const channel = await client.channels.fetch(config.channel_id);
-    if (!channel || !channel.isTextBased()) {
-      return null;
-    }
+    if (!channel || !channel.isTextBased()) return null;
     return channel;
   } catch (error) {
     console.error("Failed to fetch configured channel:", error.message);
@@ -265,15 +277,10 @@ async function getConfiguredChannel() {
   }
 }
 
-async function sendDailyStockSummary(force = false) {
+async function sendDailyStockSummary() {
   try {
     const channel = await getConfiguredChannel();
-    if (!channel) {
-      if (force) {
-        console.log("No configured channel for daily stock summary.");
-      }
-      return;
-    }
+    if (!channel) return;
 
     const products = await fetchProducts();
 
@@ -283,7 +290,7 @@ async function sendDailyStockSummary(force = false) {
           new EmbedBuilder()
             .setColor(EMBED_COLOR)
             .setTitle(`${STORE_NAME} Stock Update`)
-            .setDescription("**No products were found in the store right now.**")
+            .setDescription("**No products found right now.**")
             .setFooter({ text: STORE_NAME })
             .setTimestamp()
         ],
@@ -314,7 +321,7 @@ async function checkStockChanges() {
 
     for (const product of products) {
       const id = String(product.id);
-      const stock = Number(product.stock || 0);
+      const stock = getProductStock(product);
       const prev = lastStock[id];
 
       if (prev === undefined) {
@@ -323,9 +330,8 @@ async function checkStockChanges() {
       }
 
       if (prev <= 0 && stock > 0) {
-        const embed = buildRestockEmbed(product, stock);
         await channel.send({
-          embeds: [embed],
+          embeds: [buildRestockEmbed(product)],
           components: [buildStoreButton("Buy Now")]
         });
       }
@@ -334,9 +340,9 @@ async function checkStockChanges() {
     }
 
     const currentIds = new Set(products.map(product => String(product.id)));
-    for (const trackedId of Object.keys(lastStock)) {
-      if (!currentIds.has(trackedId)) {
-        delete lastStock[trackedId];
+    for (const id of Object.keys(lastStock)) {
+      if (!currentIds.has(id)) {
+        delete lastStock[id];
       }
     }
   } catch (error) {
@@ -350,7 +356,6 @@ client.on("interactionCreate", async interaction => {
   try {
     if (interaction.commandName === "setchannel") {
       const channel = interaction.options.getChannel("channel");
-
       config.channel_id = channel.id;
       saveConfig(config);
 
@@ -364,7 +369,7 @@ client.on("interactionCreate", async interaction => {
     if (interaction.commandName === "removechannel") {
       if (!config.channel_id) {
         await interaction.reply({
-          content: "❌ No stock channel is currently set.",
+          content: "❌ No stock channel is set.",
           ephemeral: true
         });
         return;
@@ -383,7 +388,7 @@ client.on("interactionCreate", async interaction => {
     if (interaction.commandName === "channel") {
       if (!config.channel_id) {
         await interaction.reply({
-          content: "❌ No stock channel is currently set.",
+          content: "❌ No stock channel is set.",
           ephemeral: true
         });
         return;
@@ -396,47 +401,44 @@ client.on("interactionCreate", async interaction => {
       return;
     }
 
-    if (interaction.commandName === "teststock") {
-      await interaction.reply({
-        content: "✅ Sending test stock message...",
-        ephemeral: true
-      });
-
-      await sendDailyStockSummary(true);
-      return;
-    }
-
     if (interaction.commandName === "testrestock") {
       const channel = await getConfiguredChannel();
 
       if (!channel) {
         await interaction.reply({
-          content: "❌ Set a stock channel first with /setchannel",
+          content: "❌ Set a channel first with /setchannel",
           ephemeral: true
         });
         return;
       }
 
-      const productName =
-        interaction.options.getString("product_name") || "Test Product";
-
       const fakeProduct = {
-        id: "test-product",
-        name: productName,
-        stock: 25,
+        id: "test",
+        name: "Test Product",
         price_display: "€0.00",
+        stock: 25,
         images: []
       };
 
       await channel.send({
-        embeds: [buildRestockEmbed(fakeProduct, 25)],
+        embeds: [buildRestockEmbed(fakeProduct)],
         components: [buildStoreButton("Buy Now")]
       });
 
       await interaction.reply({
-        content: "✅ Test restock message sent.",
+        content: "✅ Test restock alert sent.",
         ephemeral: true
       });
+      return;
+    }
+
+    if (interaction.commandName === "teststock") {
+      await interaction.reply({
+        content: "✅ Sending test stock update...",
+        ephemeral: true
+      });
+
+      await sendDailyStockSummary();
       return;
     }
   } catch (error) {
@@ -458,11 +460,11 @@ client.once("ready", async () => {
   try {
     const products = await fetchProducts();
     for (const product of products) {
-      lastStock[String(product.id)] = Number(product.stock || 0);
+      lastStock[String(product.id)] = getProductStock(product);
     }
-    console.log(`Loaded ${products.length} products into stock cache.`);
+    console.log(`Loaded ${products.length} products.`);
   } catch (error) {
-    console.error("Initial product load error:", error.response?.data || error.message);
+    console.error("Initial load error:", error.response?.data || error.message);
   }
 
   setInterval(checkStockChanges, CHECK_INTERVAL_MS);
