@@ -1,4 +1,14 @@
-const { Client, GatewayIntentBits, SlashCommandBuilder, REST, Routes, EmbedBuilder } = require("discord.js");
+const { 
+  Client,
+  GatewayIntentBits,
+  SlashCommandBuilder,
+  REST,
+  Routes,
+  EmbedBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  ActionRowBuilder
+} = require("discord.js");
 const axios = require("axios");
 const express = require("express");
 const fs = require("fs");
@@ -97,11 +107,13 @@ async function checkStock() {
 
   const products = await fetchProducts();
 
-  for (const product of products) {
+    for (const product of products) {
 
-   const id = String(product.id);
-   const stock = Number(product.stock || 0);
-   const name = product.name;
+  console.log(JSON.stringify(product, null, 2));
+
+  const id = String(product.id);
+  const stock = Number(product.stock || 0);
+  const name = product.name;
 
    if (!config[id]) continue;
 
@@ -112,20 +124,50 @@ async function checkStock() {
     continue;
    }
 
-   if (prev <= 0 && stock > 0) {
+if (prev <= 0 && stock > 0) {
 
-    const channel = await client.channels.fetch(config[id].restock);
+  const channel = await client.channels.fetch(config[id].restock);
 
-    const embed = new EmbedBuilder()
-     .setTitle("🔥 Restock")
-     .setDescription(`${name} is back in stock`)
-     .addFields({ name: "Stock", value: String(stock) })
-     .setTimestamp();
+  const productImage =
+    product.image ||
+    product.image_url ||
+    product.thumbnail ||
+    null;
 
-    channel.send({ embeds: [embed] });
+  const productPrice =
+    product.price_display ||
+    product.price ||
+    "Unknown";
 
-   }
+  const embed = new EmbedBuilder()
+    .setColor("#2ecc71")
+    .setTitle(`${name} Restocked`)
+    .setDescription(`Our product **${name}** has just been restocked!`)
+    .addFields(
+      { name: "Variant", value: "Default", inline: true },
+      { name: "Price", value: String(productPrice), inline: true },
+      { name: "Stock", value: String(stock), inline: true }
+    )
+    .setFooter({ text: "Niro Market" })
+    .setTimestamp();
 
+  if (productImage) {
+    embed.setImage(productImage);
+  }
+
+  const button = new ButtonBuilder()
+    .setLabel("Buy Now")
+    .setStyle(ButtonStyle.Link)
+    .setURL(`https://niro-market.mysellauth.com`);
+
+  const row = new ActionRowBuilder().addComponents(button);
+
+  await channel.send({
+    embeds: [embed],
+    components: [row]
+  });
+
+}
    if (prev > 0 && stock <= 0) {
 
     const channel = await client.channels.fetch(config[id].oos);
