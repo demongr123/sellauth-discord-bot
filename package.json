@@ -1,13 +1,14 @@
 {
-  "name": "sellauth-discord-bot",
+  "name": "sellauth-stock-bot",
   "version": "1.0.0",
+  "description": "SellAuth Discord Stock Bot",
   "main": "bot.js",
   "scripts": {
     "start": "node bot.js"
   },
   "dependencies": {
-    "axios": "^1.8.0",
-    "discord.js": "^14.18.0",
-    "express": "^4.21.2"
+    "axios": "^1.7.2",
+    "discord.js": "^14.14.1",
+    "express": "^4.19.2"
   }
 }
