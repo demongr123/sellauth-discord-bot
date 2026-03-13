@@ -1,14 +1,4 @@
-const { 
-  Client,
-  GatewayIntentBits,
-  SlashCommandBuilder,
-  REST,
-  Routes,
-  EmbedBuilder,
-  ButtonBuilder,
-  ButtonStyle,
-  ActionRowBuilder
-} = require("discord.js");
+const { Client,GatewayIntentBits,SlashCommandBuilder,REST,Routes,EmbedBuilder,ButtonBuilder,ButtonStyle,ActionRowBuilder} = require("discord.js");
 const axios = require("axios");
 const express = require("express");
 const fs = require("fs");
