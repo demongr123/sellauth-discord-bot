@@ -132,19 +132,43 @@ function getProductName(product) {
   return product.name || `Product ${product.id}`;
 }
 
+function normalizeImageUrl(value) {
+  if (!value || typeof value !== "string") return null;
+  if (value.startsWith("http://") || value.startsWith("https://")) return value;
+  return null;
+}
+
 function getProductImage(product) {
-  if (Array.isArray(product.images) && product.images.length > 0) {
-    if (product.images[0]?.url) return product.images[0].url;
+  const candidates = [
+    product?.images?.[0]?.url,
+    product?.images?.[0]?.image?.url,
+    product?.images?.[0]?.src,
+    product?.images?.[0]?.secure_url,
+
+    product?.image?.url,
+    product?.image?.src,
+    product?.image?.secure_url,
+
+    product?.thumbnail?.url,
+    product?.thumbnail,
+    product?.featured_image?.url,
+    product?.featured_image,
+
+    product?.url,
+    product?.image_url,
+    product?.image,
+    product?.cover_image,
+    product?.cover?.url
+  ];
+
+  for (const candidate of candidates) {
+    const normalized = normalizeImageUrl(candidate);
+    if (normalized) {
+      return normalized;
+    }
   }
 
-  return (
-    product.image?.url ||
-    product.image ||
-    product.image_url ||
-    product.thumbnail ||
-    product.url ||
-    null
-  );
+  return null;
 }
 
 function getProductPrice(product) {
@@ -417,7 +441,11 @@ client.on("interactionCreate", async interaction => {
         name: "Test Product",
         price_display: "€0.00",
         stock: 25,
-        images: []
+        images: [
+          {
+            url: "https://api.sellauth.com/storage/images/811919.webp"
+          }
+        ]
       };
 
       await channel.send({
